@@ -14,7 +14,8 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load("ViT-B/32", device=device)
+# Smaller model uses less RAM
+model, preprocess = clip.load("RN50", device=device)
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("items.db", check_same_thread=False)
@@ -33,7 +34,9 @@ conn.commit()
 
 # ---------------- UTILS ----------------
 def encode_image(image_path):
-    image = preprocess(Image.open(image_path)).unsqueeze(0).to(device)
+    # Resize to reduce memory usage
+    image = Image.open(image_path).convert("RGB").resize((224, 224))
+    image = preprocess(image).unsqueeze(0).to(device)
     with torch.no_grad():
         return model.encode_image(image).cpu().numpy()
 
@@ -41,25 +44,6 @@ def encode_text(text):
     tokens = clip.tokenize([text]).to(device)
     with torch.no_grad():
         return model.encode_text(tokens).cpu().numpy()
-
-def load_items():
-    c.execute("SELECT id, description, location, contact, image_path, embedding FROM items")
-    rows = c.fetchall()
-    items = []
-    for row in rows:
-        item_id, desc, loc, contact, image_path, embedding = row
-        emb = None
-        if embedding:
-            emb = np.frombuffer(embedding, dtype=np.float32).reshape(1, -1)
-        items.append({
-            "id": item_id,
-            "description": desc,
-            "location": loc,
-            "contact": contact,
-            "image": image_path,
-            "embedding": emb
-        })
-    return items
 
 def save_item(description, location, contact, image_path, embedding):
     embedding_blob = embedding.astype(np.float32).tobytes()
@@ -74,63 +58,15 @@ def delete_item(item_id):
     conn.commit()
 
 # ---------------- UI ----------------
-st.title("Campus Lost & Found ")
-items = load_items()
+st.title("Campus Lost & Found 🏫")
 
-tab1, tab2 = st.tabs(["Report Lost Item", "Report Found Item"])
-
-# ---------------- LOST ITEM ----------------
-with tab1:
-    st.subheader("Report Lost Item")
-
-    lost_text = st.text_input("Describe the lost item (optional)", key="lost_text")
-    lost_image = st.file_uploader("Upload image (optional)", type=["jpg", "png"], key="lost_image")
-    lost_location = st.text_input("Location on campus (optional)", key="lost_location")
-    
-    if st.button("Find Matches", key="find_matches"):
-        if not lost_text and not lost_image:
-            st.error("Please provide text or an image.")
-            st.stop()
-
-        # Create query embedding
-        if lost_image:
-            image_path = os.path.join(UPLOAD_DIR, lost_image.name)
-            with open(image_path, "wb") as f:
-                f.write(lost_image.read())
-            query_embedding = encode_image(image_path)
-        else:
-            query_embedding = encode_text(lost_text)
-
-        matches = []
-        for item in items:
-            if item["embedding"] is not None:
-                score = cosine_similarity(query_embedding, item["embedding"])[0][0]
-                matches.append((score, item))
-
-        matches.sort(reverse=True, key=lambda x: x[0])
-        st.subheader("🔍 Possible Matches")
-        found_any = False
-        for score, item in matches[:5]:
-            if score > 0.75:
-                found_any = True
-                st.write(f"**Description:** {item['description']}")
-                if item["location"]:
-                    st.write(f"**Location:** {item['location']}")
-                if item["contact"]:
-                    st.write(f"**Contact:** {item['contact']}")
-                if item["image"]:
-                    st.image(item["image"], width=200)
-                st.write(f"**Similarity:** {round(score * 100, 2)}%")
-                st.divider()
-        if not found_any:
-            st.info("No strong matches found yet.")
+tab1, tab2, tab3 = st.tabs(["Report Lost Item", "Report Found Item", "Search Items"])
 
 # ---------------- FOUND ITEM ----------------
 with tab2:
     st.subheader("Report Found Item")
-
     found_text = st.text_input("Describe the found item", key="found_text")
-    found_image = st.file_uploader("Upload image", type=["jpg", "png"], key="found_image")
+    found_image = st.file_uploader("Upload image (optional)", type=["jpg", "png"], key="found_image")
     found_location = st.text_input("Location on campus (optional)", key="found_location")
     found_contact = st.text_input("Your contact info (optional)", key="found_contact")
 
@@ -151,23 +87,80 @@ with tab2:
         save_item(found_text, found_location, found_contact, image_path, embedding)
         st.success("Found item saved successfully!")
 
-# ---------------- SEARCH BAR ----------------
-st.subheader("Search Items by keyword or location")
-search_term = st.text_input("Enter search keyword or location", key="search_bar")
-if search_term:
-    st.write(f"Results for: **{search_term}**")
-    results_found = False
-    for item in items:
-        if search_term.lower() in item["description"].lower() or \
-           (item["location"] and search_term.lower() in item["location"].lower()):
-            results_found = True
-            st.write(f"**Description:** {item['description']}")
-            if item["location"]:
-                st.write(f"**Location:** {item['location']}")
-            if item["contact"]:
-                st.write(f"**Contact:** {item['contact']}")
-            if item["image"]:
-                st.image(item["image"], width=200)
-            st.divider()
-    if not results_found:
-        st.info("No items match your search.")
+# ---------------- LOST ITEM ----------------
+with tab1:
+    st.subheader("Report Lost Item")
+    lost_text = st.text_input("Describe the lost item (optional)", key="lost_text")
+    lost_image = st.file_uploader("Upload image (optional)", type=["jpg", "png"], key="lost_image")
+    lost_location = st.text_input("Location on campus (optional)", key="lost_location")
+
+    if st.button("Find Matches", key="find_matches"):
+        if not lost_text and not lost_image:
+            st.error("Please provide text or an image.")
+            st.stop()
+
+        if lost_image:
+            image_path = os.path.join(UPLOAD_DIR, lost_image.name)
+            with open(image_path, "wb") as f:
+                f.write(lost_image.read())
+            query_embedding = encode_image(image_path)
+        else:
+            query_embedding = encode_text(lost_text)
+
+        # Fetch items with embeddings one by one to save memory
+        c.execute("SELECT id, description, location, contact, image_path, embedding FROM items")
+        rows = c.fetchall()
+        matches = []
+        for row in rows:
+            item_id, desc, loc, contact, image_path, embedding_blob = row
+            if embedding_blob:
+                emb = np.frombuffer(embedding_blob, dtype=np.float32).reshape(1, -1)
+                score = cosine_similarity(query_embedding, emb)[0][0]
+                matches.append((score, {
+                    "id": item_id,
+                    "description": desc,
+                    "location": loc,
+                    "contact": contact,
+                    "image": image_path
+                }))
+        matches.sort(reverse=True, key=lambda x: x[0])
+
+        st.subheader("🔍 Possible Matches")
+        found_any = False
+        for score, item in matches[:5]:
+            if score > 0.75:
+                found_any = True
+                st.write(f"**Description:** {item['description']}")
+                if item["location"]:
+                    st.write(f"**Location:** {item['location']}")
+                if item["contact"]:
+                    st.write(f"**Contact:** {item['contact']}")
+                if item["image"]:
+                    st.image(item["image"], width=200)
+                st.write(f"**Similarity:** {round(score * 100, 2)}%")
+                st.divider()
+        if not found_any:
+            st.info("No strong matches found yet.")
+
+# ---------------- SEARCH TAB ----------------
+with tab3:
+    st.subheader("Search Items by keyword or location")
+    search_term = st.text_input("Enter search keyword or location", key="search_bar")
+    if search_term:
+        c.execute("SELECT id, description, location, contact, image_path FROM items")
+        rows = c.fetchall()
+        results_found = False
+        for row in rows:
+            item_id, desc, loc, contact, image_path = row
+            if search_term.lower() in desc.lower() or (loc and search_term.lower() in loc.lower()):
+                results_found = True
+                st.write(f"**Description:** {desc}")
+                if loc:
+                    st.write(f"**Location:** {loc}")
+                if contact:
+                    st.write(f"**Contact:** {contact}")
+                if image_path:
+                    st.image(image_path, width=200)
+                st.divider()
+        if not results_found:
+            st.info("No items match your search.")
